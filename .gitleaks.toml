@@ -1,0 +1,16 @@
+# Gitleaks configuration
+# Documentation: https://github.com/gitleaks/gitleaks#configuration
+
+title = "Gitleaks config for excluding test directories"
+
+[allowlist]
+description = "Allowlist for test directories and fixtures"
+
+paths = [
+  '''tests/''',
+  '''testdata/''',
+  '''**/tests/**''',
+  '''**/testdata/**''',
+  '''sdk/python/tests/''',
+  '''examples/''',
+]
