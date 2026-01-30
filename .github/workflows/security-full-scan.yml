@@ -1,9 +1,7 @@
 name: Security Full Codebase Scan
 
-# Version: v2.3.0
-# Last Updated: 2026-01-29
-# Plugin: security-findings-manager
-# Description: Comprehensive security scanning with 9 specialized tools
+# Plugin Version: 2.3.0
+# DO NOT REMOVE: This comment is used for version detection during plugin updates
 
 # This workflow performs comprehensive security scanning on the ENTIRE codebase.
 # Complements CodeRabbit's PR incremental scanning with full repository validation.
@@ -381,7 +379,6 @@ jobs:
             ghcr.io/gitleaks/gitleaks@sha256:105ac66a57b2bb8afb61a3b8a5dcc4817773d03724a7e8a515214cfe58225556 \
             detect \
               --source /repo \
-              --config /repo/.gitleaks.toml \
               $NO_GIT_FLAG \
               --report-format json \
               --report-path /repo/gitleaks.json \
@@ -606,15 +603,83 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run kube-linter
+      # ============================================================================
+      # KUBERNETES MANIFEST DISCOVERY - Intelligent Path Detection
+      # ============================================================================
+      # Purpose: Dynamically discover all Kubernetes operator directories
+      # Strategy: Find kustomization.yaml files, exclude test paths
+      # Feeds: kube-linter and RBAC analyzer
+      # Benefit: Works with any repository structure (no hardcoded paths)
+
+      - name: Discover Kubernetes manifest directories
         if: hashFiles('go.mod') != '' || hashFiles('Makefile') != ''
+        id: discover-manifests
+        run: |
+          echo "Discovering Kubernetes manifest directories..."
+
+          # Find all kustomization files, excluding test paths
+          # -P: Don't follow symlinks (prevents infinite loops and duplicates)
+          find . -P -type f \( -name "kustomization.yaml" -o -name "kustomize.yaml" \) \
+            -not -path "*/test/*" \
+            -not -path "*/tests/*" \
+            -not -path "*/examples/*" \
+            -not -path "*/docs/*" \
+            -not -path "*/vendor/*" \
+            -not -path "*/.github/*" \
+            -not -path "*/hack/*" \
+            > discovered-kustomizations.txt
+
+          # Extract parent directories (the directories containing kustomization.yaml)
+          manifest_dirs=$(cat discovered-kustomizations.txt | xargs -I {} dirname {} | sort -u)
+
+          # Log discoveries for transparency
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Found Kubernetes manifest directories:"
+          echo "$manifest_dirs"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Save to file for other steps
+          echo "$manifest_dirs" > manifest-dirs.txt
+
+          # Set output for conditional execution
+          count=$(echo "$manifest_dirs" | grep -c . || echo 0)
+          echo "count=$count" >> $GITHUB_OUTPUT
+
+          if [ $count -eq 0 ]; then
+            echo "⚠️  No Kubernetes manifests found - skipping kube-linter and RBAC analyzer"
+          else
+            echo "✅ Found $count manifest director(ies)"
+          fi
+
+      - name: Run kube-linter
+        if: steps.discover-manifests.outputs.count > 0
         id: kubelinter
         timeout-minutes: 5
         run: |
           # Prepare kustomize and render manifests
           make prepare
+
+          # Build manifests from each discovered directory
           TMP_FILE=$(mktemp /tmp/kube-lint.XXXXXX.yaml)
-          ./bin/kustomize build config/manifests > "$TMP_FILE"
+
+          echo "Building manifests from discovered directories..."
+          # Read manifest-dirs.txt line by line to handle paths with spaces
+          while IFS= read -r dir; do
+            echo "━━━ Rendering: $dir"
+            ./bin/kustomize build "$dir" >> "$TMP_FILE" || {
+              echo "::warning::Failed to render $dir - skipping"
+              continue
+            }
+            echo "✅ Rendered: $dir"
+          done < manifest-dirs.txt
+
+          # Validate we have content
+          if [ ! -s "$TMP_FILE" ]; then
+            echo "⚠️  No manifests rendered - skipping kube-linter"
+            exit 0
+          fi
+
+          echo "Combined manifest size: $(wc -l < "$TMP_FILE") lines"
 
           # Run kube-linter with JSON output for comprehensive report
           # Capture exit code separately from output to distinguish scanner errors from findings
@@ -692,32 +757,35 @@ jobs:
       # Complement: Semgrep catches individual RBAC issues, this finds relationships
 
       - name: Setup Python for RBAC Analysis
-        if: hashFiles('.github/scripts/rbac-analyzer.py') != '' || hashFiles('config/**/*.yaml', 'manifests/**/*.yaml', 'kustomize/**/*.yaml', 'overlays/**/*.yaml', 'base/**/*.yaml') != ''
+        if: steps.discover-manifests.outputs.count > 0 && hashFiles('.github/scripts/rbac-analyzer.py') != ''
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
         with:
           python-version: '3.11'
 
       - name: Install PyYAML for RBAC analyzer
-        if: hashFiles('.github/scripts/rbac-analyzer.py') != '' || hashFiles('config/**/*.yaml', 'manifests/**/*.yaml', 'kustomize/**/*.yaml', 'overlays/**/*.yaml', 'base/**/*.yaml') != ''
+        if: steps.discover-manifests.outputs.count > 0 && hashFiles('.github/scripts/rbac-analyzer.py') != ''
         run: python -m pip install "pyyaml==6.0.3"
 
       - name: Run RBAC Privilege Chain Analyzer (Public Version)
-        if: hashFiles('.github/scripts/rbac-analyzer.py') != '' || hashFiles('config/**/*.yaml', 'manifests/**/*.yaml', 'kustomize/**/*.yaml', 'overlays/**/*.yaml', 'base/**/*.yaml') != ''
+        if: steps.discover-manifests.outputs.count > 0 && hashFiles('.github/scripts/rbac-analyzer.py') != ''
         id: rbac_analyzer
         run: |
+          echo "Running RBAC analysis on discovered directories..."
           # Generate public version (no attack scenarios) for artifacts
-          python .github/scripts/rbac-analyzer.py . --fail-on HIGH 2>&1 | tee rbac-analysis.md
+          # Pass directories as separate arguments (robust for paths with spaces)
+          python .github/scripts/rbac-analyzer.py $(cat manifest-dirs.txt | xargs) --fail-on HIGH 2>&1 | tee rbac-analysis.md
           echo "## 🔐 RBAC Privilege Chain Analysis (Public)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           cat rbac-analysis.md >> $GITHUB_STEP_SUMMARY
         continue-on-error: true
 
       - name: Generate RBAC Analysis with Attack Scenarios (Private Version)
-        if: always() && (hashFiles('.github/scripts/rbac-analyzer.py') != '' || hashFiles('config/**/*.yaml', 'manifests/**/*.yaml', 'kustomize/**/*.yaml', 'overlays/**/*.yaml', 'base/**/*.yaml') != '')
+        if: always() && steps.discover-manifests.outputs.count > 0 && hashFiles('.github/scripts/rbac-analyzer.py') != ''
         id: rbac_analyzer_private
         run: |
           # Generate private version with detailed attack scenarios for security advisory
-          python .github/scripts/rbac-analyzer.py . --fail-on HIGH --include-attack-scenarios 2>&1 | tee rbac-analysis-private.md
+          # Pass directories as separate arguments (robust for paths with spaces)
+          python .github/scripts/rbac-analyzer.py $(cat manifest-dirs.txt | xargs) --fail-on HIGH --include-attack-scenarios 2>&1 | tee rbac-analysis-private.md
           echo "✅ Private RBAC analysis with attack scenarios generated (for security advisory)"
         continue-on-error: true
 

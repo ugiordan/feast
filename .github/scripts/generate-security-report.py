@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Plugin Version: 2.3.0
+# DO NOT REMOVE: This comment is used for version detection during plugin updates
 """
 Comprehensive Security Report Generator
 

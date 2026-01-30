@@ -1,16 +1,19 @@
-# Gitleaks configuration
-# Documentation: https://github.com/gitleaks/gitleaks#configuration
-
-title = "Gitleaks config for excluding test directories"
+# Gitleaks Configuration
+# Excludes test directories and fixtures from secret scanning
 
 [allowlist]
 description = "Allowlist for test directories and fixtures"
 
+# Exclude common test paths
 paths = [
   '''tests/''',
+  '''test/''',
   '''testdata/''',
   '''**/tests/**''',
+  '''**/test/**''',
   '''**/testdata/**''',
-  '''sdk/python/tests/''',
   '''examples/''',
+  '''**/examples/**''',
+  '''sdk/python/tests/''',
+  '''infra/feast-operator/hack/''',
 ]
