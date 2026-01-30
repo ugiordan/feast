@@ -1,9 +1,0 @@
-# Gitleaks path exclusions (glob patterns, one per line)
-# Automatically configured to skip test directories
-
-tests/
-testdata/
-**/tests/**
-**/testdata/**
-sdk/python/tests/
-examples/
