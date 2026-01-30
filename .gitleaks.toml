@@ -1,0 +1,20 @@
+# Plugin Version: 2.3.0
+# DO NOT REMOVE: This comment is used for version detection during plugin updates
+# Gitleaks configuration for Feast
+# Documentation: https://github.com/gitleaks/gitleaks#configuration
+
+title = "Gitleaks config for Feast"
+
+# Exclude test data directories from scanning
+[allowlist]
+description = "Exclude test fixtures and example data"
+paths = [
+  '''sdk/python/tests/''',
+  '''go/internal/test/''',
+  '''examples/''',
+  '''docs/tutorials/''',
+]
+
+# Note: This configuration uses TOML path allowlists (not .gitleaksignore fingerprints)
+# Paths use regex matching, enclosed in triple single quotes for literal strings
+# Last updated: 2026-01-30
