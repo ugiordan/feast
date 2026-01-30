@@ -618,8 +618,8 @@ jobs:
           echo "Discovering Kubernetes manifest directories..."
 
           # Find all kustomization files, excluding test paths
-          # -P: Don't follow symlinks (prevents infinite loops and duplicates)
-          find . -P -type f \( -name "kustomization.yaml" -o -name "kustomize.yaml" \) \
+          # Note: GNU find doesn't follow symlinks by default (unlike BSD find)
+          find . -type f \( -name "kustomization.yaml" -o -name "kustomize.yaml" \) \
             -not -path "*/test/*" \
             -not -path "*/tests/*" \
             -not -path "*/examples/*" \
