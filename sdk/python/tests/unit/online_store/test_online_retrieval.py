@@ -21,7 +21,7 @@ from feast.repo_config import RegistryConfig
 from feast.torch_wrapper import get_torch
 from feast.types import ValueType
 from feast.utils import _utc_now
-from tests.integration.feature_repos.universal.feature_views import TAGS
+from tests.universal.feature_repos.universal.feature_views import TAGS
 from tests.utils.cli_repo_creator import CliRunner, get_example_repo
 
 
@@ -1208,7 +1208,7 @@ def test_milvus_lite_retrieve_online_documents_v2() -> None:
         )
         documents_df = pd.DataFrame(
             {
-                "item_id": [str(i) for i in range(n)],
+                "item_id": [i for i in range(n)],
                 "author_id": [f"author_{i}" for i in range(n)],
                 "vector": [
                     np.random.random(

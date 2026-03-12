@@ -56,6 +56,12 @@ PROTO_TO_MILVUS_TYPE_MAPPING: Dict[ValueType, DataType] = {
     PROTO_VALUE_TO_VALUE_TYPE_MAP["int64_list_val"]: DataType.FLOAT_VECTOR,
     PROTO_VALUE_TO_VALUE_TYPE_MAP["double_list_val"]: DataType.FLOAT_VECTOR,
     PROTO_VALUE_TO_VALUE_TYPE_MAP["bool_list_val"]: DataType.BINARY_VECTOR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["map_val"]: DataType.VARCHAR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["map_list_val"]: DataType.VARCHAR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["json_val"]: DataType.VARCHAR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["json_list_val"]: DataType.VARCHAR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["struct_val"]: DataType.VARCHAR,
+    PROTO_VALUE_TO_VALUE_TYPE_MAP["struct_list_val"]: DataType.VARCHAR,
 }
 
 FEAST_PRIMITIVE_TO_MILVUS_TYPE_MAPPING: Dict[
@@ -81,6 +87,10 @@ for value_type, feast_type in VALUE_TYPES_TO_FEAST_TYPES.items():
             FEAST_PRIMITIVE_TO_MILVUS_TYPE_MAPPING[feast_type] = DataType.VARCHAR
         elif base_value_type == ValueType.BOOL:
             FEAST_PRIMITIVE_TO_MILVUS_TYPE_MAPPING[feast_type] = DataType.BINARY_VECTOR
+    elif isinstance(feast_type, ComplexFeastType):
+        milvus_type = PROTO_TO_MILVUS_TYPE_MAPPING.get(value_type)
+        if milvus_type:
+            FEAST_PRIMITIVE_TO_MILVUS_TYPE_MAPPING[feast_type] = milvus_type
 
 
 class MilvusOnlineStoreConfig(FeastConfigBaseModel, VectorStoreConfig):
@@ -167,10 +177,14 @@ class MilvusOnlineStore(OnlineStore):
             fields_to_exclude = [
                 "event_ts",
                 "created_ts",
+                "event_timestamp",
+                "created_timestamp",
             ]
             fields_to_add = [f for f in table.schema if f.name not in fields_to_exclude]
             for field in fields_to_add:
                 dtype = FEAST_PRIMITIVE_TO_MILVUS_TYPE_MAPPING.get(field.dtype)
+                if dtype is None and isinstance(field.dtype, ComplexFeastType):
+                    dtype = DataType.VARCHAR
                 if dtype:
                     if dtype == DataType.FLOAT_VECTOR:
                         fields.append(
@@ -202,6 +216,7 @@ class MilvusOnlineStore(OnlineStore):
                     schema=schema,
                 )
                 index_params = self.client.prepare_index_params()
+                indices_added = False
                 for vector_field in schema.fields:
                     if (
                         vector_field.dtype
@@ -222,7 +237,8 @@ class MilvusOnlineStore(OnlineStore):
                             index_name=f"vector_index_{vector_field.name}",
                             params={"nlist": config.online_store.nlist},
                         )
-                if len(index_params) > 0:
+                        indices_added = True
+                if indices_added:
                     self.client.create_index(
                         collection_name=collection_name,
                         index_params=index_params,
@@ -280,6 +296,16 @@ class MilvusOnlineStore(OnlineStore):
                 vector_cols=vector_cols,
                 serialize_to_string=True,
             )
+
+            # Remove timestamp fields that are handled separately to avoid conflicts
+            timestamp_fields = [
+                "event_timestamp",
+                "created_timestamp",
+                "event_ts",
+                "created_ts",
+            ]
+            for field in timestamp_fields:
+                values_dict.pop(field, None)
 
             single_entity_record = {
                 composite_key_name: entity_key_str,
@@ -419,6 +445,19 @@ class MilvusOnlineStore(OnlineStore):
                                 "double_list_val",
                             ]:
                                 getattr(val, proto_attr).val.extend(field_value)
+                            elif proto_attr in [
+                                "map_val",
+                                "map_list_val",
+                                "struct_val",
+                                "struct_list_val",
+                                "json_list_val",
+                            ]:
+                                if isinstance(field_value, str) and field_value:
+                                    try:
+                                        proto_bytes = base64.b64decode(field_value)
+                                        val.ParseFromString(proto_bytes)
+                                    except Exception:
+                                        setattr(val, "string_val", field_value)
                             else:
                                 setattr(val, proto_attr, field_value)
                         else:
@@ -722,7 +761,7 @@ def _extract_proto_values_to_dict(
     numeric_vector_list_types = [
         k
         for k in PROTO_VALUE_TO_VALUE_TYPE_MAP.keys()
-        if k is not None and "list" in k and "string" not in k
+        if k is not None and ("list" in k or "set" in k) and "string" not in k
     ]
     numeric_types = [
         "double_val",
@@ -747,9 +786,13 @@ def _extract_proto_values_to_dict(
                         if (
                             serialize_to_string
                             and proto_val_type
-                            not in ["string_val", "bytes_val"] + numeric_types
+                            not in ["string_val", "bytes_val", "unix_timestamp_val"]
+                            + numeric_types
                         ):
-                            vector_values = feature_values.SerializeToString().decode()
+                            # For complex types, use base64 encoding instead of decode
+                            vector_values = base64.b64encode(
+                                feature_values.SerializeToString()
+                            ).decode("utf-8")
                         elif proto_val_type == "bytes_val":
                             byte_data = getattr(feature_values, proto_val_type)
                             vector_values = base64.b64encode(byte_data).decode("utf-8")
