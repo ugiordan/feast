@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -47,6 +48,7 @@ import (
 
 	feastdevv1 "github.com/feast-dev/feast/infra/feast-operator/api/v1"
 	feastdevv1alpha1 "github.com/feast-dev/feast/infra/feast-operator/api/v1alpha1"
+	configv1 "github.com/openshift/api/config/v1"
 	routev1 "github.com/openshift/api/route/v1"
 
 	"github.com/feast-dev/feast/infra/feast-operator/internal/controller"
@@ -61,6 +63,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(configv1.AddToScheme(scheme))
 	utilruntime.Must(routev1.AddToScheme(scheme))
 	utilruntime.Must(feastdevv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(feastdevv1.AddToScheme(scheme))
@@ -107,6 +110,11 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
+	// Fetch and apply OpenShift TLS profile (falls back to TLS 1.2 on non-OpenShift or transient errors)
+	cfg := ctrl.GetConfigOrDie()
+	tlsProfileOpts := fetchTLSProfile(context.Background(), scheme, cfg)
+	tlsOpts = append(tlsOpts, tlsProfileOpts...)
+
 	webhookServer := webhook.NewServer(webhook.Options{
 		TLSOpts: tlsOpts,
 	})
@@ -135,7 +143,7 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -222,6 +230,49 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// fetchTLSProfile reads the cluster-wide TLS security profile from the OpenShift
+// APIServer resource. On non-OpenShift clusters or transient API errors it falls
+// back to hardened defaults (TLS 1.2 minimum).
+func fetchTLSProfile(ctx context.Context, s *runtime.Scheme, restCfg *rest.Config) []func(*tls.Config) {
+	bootstrapClient, err := client.New(restCfg, client.Options{Scheme: s})
+	if err != nil {
+		setupLog.Error(err, "unable to create bootstrap client for TLS profile")
+		os.Exit(1)
+	}
+
+	apiServer := &configv1.APIServer{}
+	key := client.ObjectKey{Name: "cluster"}
+	if err := bootstrapClient.Get(ctx, key, apiServer); err != nil {
+		switch {
+		case apimeta.IsNoMatchError(err):
+			setupLog.Info("TLS profile not available, using hardened defaults (non-OpenShift cluster)")
+		case apierrors.IsNotFound(err):
+			setupLog.Info("APIServer resource not found, using hardened defaults")
+		case apierrors.IsForbidden(err):
+			setupLog.Info("APIServer access forbidden, using hardened defaults (restricted RBAC)")
+		case apierrors.IsServiceUnavailable(err),
+			apierrors.IsTimeout(err),
+			apierrors.IsTooManyRequests(err):
+			setupLog.Info("Transient API error reading TLS profile, using hardened defaults", "error", err)
+		default:
+			setupLog.Error(err, "unable to read APIServer TLS profile, refusing to start with unknown TLS posture")
+			os.Exit(1)
+		}
+		return []func(*tls.Config){
+			func(c *tls.Config) {
+				c.MinVersion = tls.VersionTLS12
+			},
+		}
+	}
+
+	setupLog.Info("Using TLS profile from APIServer", "profile", apiServer.Spec.TLSSecurityProfile)
+	return []func(*tls.Config){
+		func(c *tls.Config) {
+			c.MinVersion = tls.VersionTLS12
+		},
 	}
 }
 
